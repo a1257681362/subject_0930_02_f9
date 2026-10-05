@@ -119,3 +119,18 @@
 - 全程留证：规则发布/停用、库位登记/装货/检验/释放、订单创建/完成、预约拆分/锁定/完成、分仓、差异单、换车、通知签收均写 `t_fishing_change_evidence`（含操作者、前后快照与幂等请求号），可经 `GET /api/aqua/fishing/evidence` 按对象或 requestId 追溯。
 
 验收：`mvn test -Dtest=FishingReservationAcceptanceTest`，13 个检查点逐段输出报告，失败即停并给出停点。
+
+## 池塘水质传感器接入（aqua-9）
+
+模块包路径 `com.evops.aqua.sensor`，在台账之上打通：设备登记/更换 → 归并规则版本 → 设备离线批量上传盐度/溶氧/温度 → 服务端按设备时间与序号归并 → 异常读数待复核 → 水质日报按池按日汇总 → 审核冻结区间，全程留证。
+
+- 设备档案（`POST /api/aqua/sensor/devices`）：按池塘登记设备并下发 HMAC 签名密钥；requestId 幂等，设备编码全局唯一。
+- 设备更换（`POST /api/aqua/sensor/devices/{id}/replace`）：**建立新旧关联**——新设备 predecessor 指向旧设备、旧设备置 REPLACED 并回指新设备，更换原因必填；`GET /{id}/lineage` 沿关联链串起同池历任设备；**旧设备的离线积压数据仍可归并**（密钥保留），池塘数据序列跨设备延续。
+- 归并规则版本（`POST /api/aqua/sensor/rule-versions`）：盐度/溶氧/温度正常范围（闭区间）。**规则调整只能生成新版本**——发布后旧版本自动停用，无修改/删除入口；归并时冻结当时版本指针到包/读数/日报，**离线归并旧结论不随新版本回改**。
+- 批量上传（`POST /api/aqua/sensor/packets`）：设备离线后整包上传（rawPayload 原文 + HMAC-SHA256 签名）。**签名失败或原文不可解析整包隔离（QUARANTINED）并保留原文**，不做任何归并；requestId 与（设备+包号）双幂等，**重复上传返回首次归并结果，不重复计入日报**。
+- 服务端归并：按「**设备 + 设备时间 + 序号**」唯一键归并，重复读数识别为 DUPLICATE 不产生第二行；**迟到数据只能补充未审核区间**——所属日报已审核（REVIEWED）的迟到读数标记 LATE_REJECTED 留存不计入，已审核结论不被改动。
+- 异常读数（超当时生效规则阈值）**进入待复核队列**（`GET /api/aqua/sensor/review-queue`），复核前不计入日报；复核（`POST /review-queue/{id}/review`）人与理由必填——确认异常保持剔除，改判正常仅当所属区间未审核才补入日报。
+- 水质日报（`GET /api/aqua/sensor/daily-reports`）：按池按日汇总已纳入读数（正常+改判正常）的均值/极值与待复核计数；未审核（OPEN）区间可被归并/复核重算，`POST /daily-reports/{id}/review` 审核人必填、通过后区间冻结，重复审核幂等。
+- 全程留证：设备登记/更换、规则发布/停用、包归并/隔离、读数迟到拒收、异常复核、日报审核均写 `t_sensor_change_evidence`（含操作前后快照与幂等请求号），可经 `GET /api/aqua/sensor/evidence` 按对象或 requestId 追溯。
+
+验收：`mvn test -Dtest=SensorIngestAcceptanceTest`，14 个检查点逐段输出报告，失败即停并给出停点。
