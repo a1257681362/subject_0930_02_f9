@@ -119,3 +119,18 @@
 - 全程留证：规则发布/停用、库位登记/装货/检验/释放、订单创建/完成、预约拆分/锁定/完成、分仓、差异单、换车、通知签收均写 `t_fishing_change_evidence`（含操作者、前后快照与幂等请求号），可经 `GET /api/aqua/fishing/evidence` 按对象或 requestId 追溯。
 
 验收：`mvn test -Dtest=FishingReservationAcceptanceTest`，13 个检查点逐段输出报告，失败即停并给出停点。
+
+## 池塘水质传感器接入（aqua-9）
+
+模块包路径 `com.evops.aqua.sensor`，打通：设备登记（含签名密钥）→ 离线批量上传盐度/溶氧/温度 → 验签后按设备时间与序号归并 → 异常读数待复核 → 日报按池按日按指标汇总 → 审核锁定区间，全程留证。
+
+- 设备档案（`POST /api/aqua/sensor/devices`）：按设备编码登记，绑定池塘与签名密钥；requestId 幂等，重复登记返回首条。
+- 批量上传（`POST /api/aqua/sensor/uploads`）：请求头 `X-Device-Code` / `X-Request-Id` / `X-Signature`，报文原文整体接收；**签名 = HMAC-SHA256(设备密钥, requestId + "\n" + 原始报文) 的十六进制串**。**签名失败或设备未登记的包整包隔离并保留原文**（`GET /api/aqua/sensor/quarantine` 可查原文与原因），绝不进入归并；退役设备上传直接拒绝。
+- 归并（按设备时间与序号）：读数以「设备 + 指标 + 设备时间 + 序号」为自然键去重——**同 requestId 整包重传返回首次结果；新 requestId 部分重叠只补缺失槽位**；归并时冻结当时规则版本与判定结论。
+- 异常读数待复核（`GET /api/aqua/sensor/review-queue`）：超出规则正常范围的读数入队且**暂不计入日报**；`POST /review-queue/{id}/resolve` 复核——CONFIRMED 确认有效补入未审核日报，EXCLUDED 剔除永不计入；复核人与意见必填，同结论重复复核幂等。
+- 日报（`GET /api/aqua/sensor/daily-reports`）：按（池, 日, 指标）一行，统计（样本数/均值/最小/最大）**由归并读数重算得出，重新上传不会重复计入**；`POST /daily-reports/{id}/review` 审核后区间锁定（重复审核幂等）——**迟到数据只能补充未审核区间**，落入已审核区间的读数记 LATE_REJECTED 留痕且响应逐条说明，不入日报。
+- 设备更换（`POST /api/aqua/sensor/devices/{id}/replace`）：原因与操作人必填，同一事务登记新设备、旧设备置 RETIRED、写新旧关联行；`GET /devices/{id}/lineage` 沿关联链双向追溯谱系；日报按池连续，换设备不断档。
+- 规则版本（`POST /api/aqua/sensor/rule-versions`）：盐度/溶氧/温度三组正常范围；**规则调整只能发布新版本（旧版本自动停用），已归并读数与日报冻结旧版本结论，绝不回改**。
+- 全程留证：设备登记/更换、规则版本发布与停用、上传归并、迟到拒绝、复核、日报审核、隔离均写 `t_sensor_change_evidence`（含操作前后快照与幂等请求号），可经 `GET /api/aqua/sensor/evidence` 按对象或 requestId 追溯。
+
+验收：`mvn test -Dtest=SensorIngestAcceptanceTest`，15 个检查点逐段输出报告，失败即停并给出停点。
